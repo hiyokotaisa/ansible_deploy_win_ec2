@@ -1,0 +1,72 @@
+---
+- hosts: localhost
+  gather_facts: no
+  vars:
+    aws_keyname: "<YOUR_AWS_KEY_NAME>"       # e.g.) test_awskey
+    aws_keypath: "<PATH_TO_YOUR_AWS_KEY>"    # e.g.) ./test_awskey.pem
+    aws_imageid: "ami-014612c2d9afaf1ac" # Microsoft Windows Server 2019 Base (AWS提供のもの)
+    aws_instance_type: "t2.small"
+    aws_region: "ap-northeast-1"
+    aws_instance_name: "<YOUR_INSTANCE_NAME>"    # デプロイするインスタンス名 e.g.) hiyoko_win2019
+    aws_security_group: "<YOUR_SECURITY_GROUP_NAME>"  # 適用するセキュリティグループ名 e.g.) test_sg
+    ps1_path: "./ps1/init.ps1"
+
+  tasks:
+    - name: Check init.ps1 exists
+      stat:
+        path: "{{ ps1_path }}"
+      register: ps1
+
+    - name: (Optional) Download init.ps1 if does not exist
+      get_url:
+        url: https://raw.githubusercontent.com/hiyokotaisa/ansible_deploy_win_ec2/main/ps1/init.ps1 # GitHub上のinit.ps1ファイル
+        dest: "{{ ps1_path }}"
+      when: not ps1.stat.exists
+
+    - name: Load ps1 script to variable(init_script)
+      shell: cat "{{ ps1_path }}"
+      register: init_script
+
+    - name: Launch Windows Instance on EC2
+      ec2:
+        wait: yes
+        key_name: "{{ aws_keyname }}"
+        image: "{{ aws_imageid }}"
+        count: 1
+        group: "{{ aws_security_group }}"
+        instance_type: "{{ aws_instance_type }}"
+        instance_tags:
+          Name: "{{ aws_instance_name }}"
+        region: "{{ aws_region }}"
+        user_data: "{{ init_script.stdout }}"
+      register: ec2
+
+    - name: Getting a password for new instance
+      ec2_win_password:
+        instance_id: "{{ item.id }}"
+        region: "{{ aws_region }}"
+        key_file: "{{ aws_keypath }}"
+        wait: yes
+        wait_timeout: 300
+      register: win
+      loop: "{{ ec2.instances }}"
+
+    - name: Add new instance to host group
+      add_host:
+        hostname: "{{ item.public_ip }}"
+        groupname: "launched"
+        ansible_user: Administrator
+        ansible_password: "{{ (win.results | first).win_password }}"
+        ansible_winrm_transport: ntlm
+        ansible_winrm_server_cert_validation: ignore
+      loop: "{{ ec2.instances }}"
+
+- hosts: launched
+  gather_facts: no
+  connection: winrm
+  tasks:
+    - wait_for_connection:
+        timeout: 300
+
+    - name: Test Ping for new Windows node
+      win_ping:
